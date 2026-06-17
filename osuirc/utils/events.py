@@ -6,13 +6,6 @@ from osuirc.objects.enums import GameMode, Mods, ScoreMode, TeamMode, TeamType
 from osuirc.objects.osu import Beatmap
 
 
-class ClientEvents:
-    def __init__(self) -> None:
-        self.welcome = Event()
-        self.motd_start = Event()
-        self.motd_end = Event()
-
-
 @dataclass
 class BaseMatchEvent:
     channel: MpChannel

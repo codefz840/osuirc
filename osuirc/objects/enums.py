@@ -29,6 +29,12 @@ class TeamMode(IntEnum):
     TagTeamVs = 3
 
 
+class MpStatus(Enum):
+    NotReady = "Not Ready"
+    Ready = "Ready"
+    NoMap = "No Map"
+
+
 class Mods(IntFlag):
     NoMod = 0
     NoFail = 1

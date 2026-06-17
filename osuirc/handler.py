@@ -16,7 +16,7 @@ from osuirc.objects.osu import Beatmap
 
 
 from .objects.message import Message
-from .objects.enums import GameMode, Mods, ScoreMode, TeamMode, TeamType
+from .objects.enums import GameMode, Mods, MpStatus, ScoreMode, TeamMode, TeamType
 from .objects.user import User
 from .utils.errors import LoginFailError
 from .utils.events import *
@@ -29,6 +29,12 @@ if TYPE_CHECKING:
 MatchEventT = TypeVar("MatchEventT", bound=BaseMatchEvent)
 log = logging.getLogger("IrcClient")
 
+irc_events: Dict[Pattern[str], Callable] = {}
+
+def irc_hook(regex: Pattern[str]):
+    def wapper(func):
+        irc_events[regex] = func
+    return wapper 
 
 class IrcHandler:
     def __init__(self, client: "IrcClient") -> None:
@@ -54,7 +60,7 @@ class IrcHandler:
         }
 
     async def __call__(self, payload: str) -> None:
-        for pattern in self.events:
+        for pattern in irc_events:
             if m := re.match(pattern, payload):
                 return await self.events[pattern](*m.groups())
 
@@ -63,23 +69,24 @@ class IrcHandler:
     async def nothing(self, *_):
         return
 
+    # @irc_hook(WELCOME)
     async def on_welcome(self):
-        self.client.events.welcome.set()
+        self.client.__flag_welcome.set()
         asyncio.create_task(self.on_ready())
 
     async def on_motd(self, code: str, message: str):
         log.debug(message)
         if code == "375":
-            self.client.events.motd_start.set()
+            self.client.__flag_motd_start.set()
         elif code == "376":
-            self.client.events.motd_end.set()
+            self.client.__flag_motd_end.set()
         else:
             pass
 
     async def on_ready(self):
-        await self.client.events.welcome.wait()
-        await self.client.events.motd_start.wait()
-        await self.client.events.motd_end.wait()
+        await self.client.__flag_welcome.wait()
+        await self.client.__flag_motd_start.wait()
+        await self.client.__flag_motd_end.wait()
         asyncio.create_task(self.client.on_ready())
         log.debug("ON_READY.")
 
@@ -102,7 +109,7 @@ class IrcHandler:
         log.debug(f"ON_JOIN: {user=} {channel_name=}")
 
     async def on_part(self, user: str, channel_name: str):
-        channel = self.client.channels[channel_name]
+        channel = self.client.get_channel(channel_name)
         channel.users.discard(user)
         if user.lower() == self.client.nickname.lower():
             channel.joined = False
@@ -110,9 +117,7 @@ class IrcHandler:
         log.debug(f"ON_PART: {user=} {channel_name=}")
 
     async def on_message(self, sender: str, target: str, content: str):
-        if not (user := self.client.users_cache.get(sender)):
-            user = User(self.client, sender)
-            self.client.users_cache[sender] = user
+        user = self.client.get_user(sender)
         context = Message(self.client, user, target, content)
         if sender == self.client.nickname:
             if content[0] == ":":
@@ -124,19 +129,19 @@ class IrcHandler:
         log.debug(f"ON_MODE: {admin=} {channel_name=} {mode=} {user=}")
 
     async def on_chtopic(self, channel_name: str, topic: str):
-        channel = self.client.channels[channel_name]
+        channel = self.client.get_channel(channel_name)
         if m := re.match(MP_GAMEID, topic):
             game_id = int(m.group(1))
             channel.game_id = game_id
         log.debug(f"ON_CHANNEL_TOPIC: {channel_name=} {topic=}")
 
     async def on_chtime(self, channel_name: str, time: int):
-        channel = self.client.channels[channel_name]
+        channel = self.client.get_channel(channel_name)
         channel.created_time = float(time)
         log.debug(f"ON_CHANNEL_CREATED_TIME: {channel_name=} {time=}")
 
     async def on_chusers(self, channel_name: str, users: str):
-        channel = self.client.channels[channel_name]
+        channel = self.client.get_channel(channel_name)
         channel.users = set(
             (u.removeprefix("@").removeprefix("+") for u in users.split())
         )
@@ -144,12 +149,13 @@ class IrcHandler:
 
     async def on_endofnames(self, channel_name: str):
         log.debug(f"ON_ENDOFNAMES: {channel_name=}")
-        channel = self.client.channels[channel_name]
+        channel = self.client.get_channel(channel_name)
         log.debug(f"channel={channel.__dict__}")
 
     async def on_whoisuser(self, username: str, user_id: str):
-        user = self.client.users_cache[username]
+        user = self.client.get_user(username)
         user.user_id = int(user_id)
+        assert user.user_id == self.client.users_cache[username].user_id
         log.debug(f"ON_WHOISUSER: {username=} {user_id=}")
 
     async def on_whoisserver(self, username: str, host: str, server_info: str):
@@ -210,7 +216,7 @@ class MultiplayerHandler:
             if m := re.match(pattern, ctx.content):
                 asyncio.create_task(self.events[pattern](ctx.channel, **m.groupdict()))
 
-    async def call_ext(self, event: MatchEventT, channel: "MpChannel", **kwargs):
+    async def emit(self, event: MatchEventT, channel: "MpChannel", **kwargs):
         # 擴充mp處理程序呼叫器
         if handlers := self.ext_events.get(event):
             Event = event(channel, **kwargs)
@@ -223,7 +229,7 @@ class MultiplayerHandler:
         # Locked the match
         old = channel.locked
         channel.locked = True
-        await self.call_ext(
+        await self.emit(
             MatchLockChanged,
             channel,
             old=old,
@@ -236,7 +242,7 @@ class MultiplayerHandler:
         # Unlocked the match
         old = channel.locked
         channel.locked = False
-        await self.call_ext(
+        await self.emit(
             MatchLockChanged,
             channel,
             old=old,
@@ -256,7 +262,7 @@ class MultiplayerHandler:
         # Changed match to size 12
         old = channel.size
         channel.size = size
-        await self.call_ext(
+        await self.emit(
             MatchSizeChanged,
             channel,
             old=old,
@@ -274,7 +280,7 @@ class MultiplayerHandler:
             if s.endswith(" slots"):
                 old_size = channel.size
                 channel.size = int(s.removesuffix(" slots"))
-                await self.call_ext(
+                await self.emit(
                     MatchSizeChanged,
                     channel,
                     old=old_size,
@@ -307,7 +313,7 @@ class MultiplayerHandler:
         old_slot = channel.slots._username_slot[username]
         new_slot = int(new_slot)
         channel.slots.move(username, new_slot)
-        await self.call_ext(
+        await self.emit(
             PlayerSlotChanged,
             channel,
             username=username,
@@ -325,7 +331,7 @@ class MultiplayerHandler:
     async def on_change_host(self, channel: "MpChannel", host=None):
         old_host = channel.host
         channel.host = host
-        await self.call_ext(
+        await self.emit(
             MatchHostChanged,
             channel,
             old=old_host,
@@ -341,7 +347,7 @@ class MultiplayerHandler:
         # Room name: 840, History: https://osu.ppy.sh/mp/98933063
         old_room_name = channel.room_name
         channel.room_name = room_name
-        await self.call_ext(
+        await self.emit(
             MatchRoomNameChanged,
             channel,
             old=old_room_name,
@@ -367,7 +373,7 @@ class MultiplayerHandler:
             title=map_repl.split(" - ")[1].split(" [")[0],  # 有些地圖名稱會有 [xxx] 這種東西
             version=map_repl.split(" [")[1].removesuffix("]"),
         )
-        await self.call_ext(
+        await self.emit(
             MatchMapChanged,
             channel,
             old=old_map,
@@ -382,7 +388,7 @@ class MultiplayerHandler:
         # Team mode: HeadToHead, Win condition: Score
         old_team_mode = channel.team_mode
         channel.team_mode = TeamMode[team_mode]
-        await self.call_ext(
+        await self.emit(
             MatchTeamModeChanged,
             channel,
             old=old_team_mode,
@@ -391,7 +397,7 @@ class MultiplayerHandler:
 
         old_score_mode = channel.score_mode
         channel.score_mode = ScoreMode[score_mode]
-        await self.call_ext(
+        await self.emit(
             MatchScoreModeChanged,
             channel,
             old=old_score_mode,
@@ -404,13 +410,37 @@ class MultiplayerHandler:
         # Players: 1
         old_player_count = channel.player_count
         channel.player_count = int(player_count)
-        channel.slots.clear()
-        await self.call_ext(
+        channel.reset_slots()
+        
+        await self.emit(
             MatchPlayerCountChanged,
             channel,
             old=old_player_count,
             new=channel.player_count,
         )
+
+
+    def flag_parser(flags: str):
+        team = TeamType.Neutral
+        is_host = False
+        enabled_mods = Mods.NoMod
+
+        for flag in flags.strip()[1:-1].split(" / "):
+            if flag == "Host":
+                is_host = True
+            elif flag == "Team Blue":
+                team = TeamType.Blue
+            elif flag == "Team Red":
+                team = TeamType.Red
+            else:
+                enabled_mods = Mods.from_str(*flag.split(", "))
+
+        return (
+            is_host,
+            team,
+            enabled_mods
+        )   
+         
 
     # MP_SLOT_INFO
     async def update_palyer(
@@ -426,40 +456,24 @@ class MultiplayerHandler:
         # Slot 1  Not Ready https://osu.ppy.sh/u/6008293 _CHIMERA        [Host / Team Blue / Hidden]
         #         No Map
         #         Ready
-
-        # 初始化
-        channel.host = None
-        is_host = False
-        team = TeamType.Neutral
-        enabled_mods = Mods.NoMod
-
-        for flag in flags.strip()[1:-1].split(" / "):
-            if flag == "Host":
-                channel.host = user_name
-                is_host = True
-            elif flag == "Team Blue":
-                team = TeamType.Blue
-            elif flag == "Team Red":
-                team = TeamType.Red
-            else:
-                enabled_mods = Mods.from_str(*flag.split(", "))
-
-        channel.slots.set(
-            slot_number=int(slot),
-            username=user_name,
-            user_id=user_id,
-            status=status,
+        _status = MpStatus[status]
+        is_host, team, enabled_mods = self.flag_parser(flags)
+        channel.update_slot(
+            slot=int(slot), 
+            username=user_name, 
+            user_id=user_id, 
+            status=_status,
             is_host=is_host,
             team=team,
-            enabled_mods=enabled_mods,
+            enable_mods=enabled_mods
         )
-        await self.call_ext(
+        await self.emit(
             SlotUpdated,
             channel,
             slot_number=int(slot),
             username=user_name,
             user_id=user_id,
-            status=status,
+            status=_status,
             is_host=is_host,
             team=team,
             enabled_mods=enabled_mods,
@@ -471,7 +485,7 @@ class MultiplayerHandler:
         # success: The match has started!
         # fail: The match has already been started
         channel.started = True
-        await self.call_ext(
+        await self.emit(
             MatchStarted,
             channel,
         )
@@ -485,7 +499,7 @@ class MultiplayerHandler:
         # success: Aborted the match
         # fail: The match is not in progress
         channel.started = False
-        await self.call_ext(
+        await self.emit(
             MatchAborted,
             channel,
         )
@@ -496,7 +510,7 @@ class MultiplayerHandler:
         user = channel.slots.get(user)
         old_team = user.team
         user.team = TeamType[team]
-        await self.call_ext(
+        await self.emit(
             PlayerTeamChanged,
             channel,
             user=user,
@@ -509,7 +523,7 @@ class MultiplayerHandler:
         # Changed match mode to OsuMania
         old_game_mode = channel.game_mode
         channel.game_mode = GameMode[game_mode]
-        await self.call_ext(
+        await self.emit(
             MatchGameModeChanged,
             channel,
             old=old_game_mode,
@@ -527,7 +541,7 @@ class MultiplayerHandler:
         old_freemod = channel.freemod
         channel.active_mods = Mods.from_str(*enabled_mods.split(", "))
         channel.freemod = freemod == "en"
-        await self.call_ext(
+        await self.emit(
             MatchModsChanged,
             channel,
             old_enabled_mods=old_enabled_mods,
@@ -541,7 +555,7 @@ class MultiplayerHandler:
         # no params: Removed the match password
         # has params: Changed the match password
         channel.has_password = password == "Changed"
-        await self.call_ext(
+        await self.emit(
             MatchPasswordChanged,
             channel,
             has_password=channel.has_password,
@@ -551,7 +565,7 @@ class MultiplayerHandler:
     async def on_addref(self, channel: "MpChannel", ref: str):
         # Added _CHIMERA to the match referees
         channel.refs.add(ref)
-        await self.call_ext(
+        await self.emit(
             MatchRefereeAdded,
             channel,
             ref=ref,
@@ -561,7 +575,7 @@ class MultiplayerHandler:
     async def on_removeref(self, channel: "MpChannel", ref: str):
         # Removed _CHIMERA from the match referees
         channel.refs.remove(ref)
-        await self.call_ext(
+        await self.emit(
             MatchRefereeRemoved,
             channel,
             ref=ref,
@@ -576,7 +590,7 @@ class MultiplayerHandler:
     # MP_KICKED
     async def on_kick(self, channel: "MpChannel", user: str):
         # Kicked _CHIMERA from the match
-        await self.call_ext(
+        await self.emit(
             PlayerKicked,
             channel,
             user=user,
@@ -585,7 +599,7 @@ class MultiplayerHandler:
     # MP_TIMER_START
     async def on_timer(self, channel: "MpChannel", time: str):
         # Countdown ends in ?? minutes/seconds
-        await self.call_ext(
+        await self.emit(
             MatchTimerStarted,
             channel,
             time=int(time),
@@ -594,7 +608,7 @@ class MultiplayerHandler:
     # MP_TIMER_ABORT
     async def on_aborttimer(self, channel: "MpChannel"):
         # Countdown aborted
-        await self.call_ext(
+        await self.emit(
             MatchTimerAborted,
             channel,
         )
@@ -602,7 +616,7 @@ class MultiplayerHandler:
     # MP_BANNED
     async def on_ban(self, channel: "MpChannel", user: str):
         # Banned _CHIMERA from the match
-        await self.call_ext(
+        await self.emit(
             PlayerBanned,
             channel,
             user=user,
@@ -611,7 +625,7 @@ class MultiplayerHandler:
     # MP_CLOSE
     async def on_close(self, channel: "MpChannel"):
         # Closed the match
-        await self.call_ext(
+        await self.emit(
             MatchClosed,
             channel,
         )
@@ -622,8 +636,9 @@ class MultiplayerHandler:
     ):
         # _CHIMERA joined in slot 1.
         # _CHIMERA joined in slot 1 for team blue/red.
-        channel.slots.set(int(slot), user, TeamType(team))
-        await self.call_ext(
+        channel.update_slot(slot=int(slot),username=user,team=TeamType(team))
+        channel.player_count += 1
+        await self.emit(
             PlayerJoined,
             channel,
             user=user,
@@ -635,7 +650,8 @@ class MultiplayerHandler:
     async def on_left(self, channel: "MpChannel", user: str):
         # _CHIMERA left the game.
         channel.slots.remove_from_username(user)
-        await self.call_ext(
+        channel.player_count -= 1
+        await self.emit(
             PlayerLeft,
             channel,
             user=user,
@@ -647,7 +663,7 @@ class MultiplayerHandler:
     # MP_ALL_READY
     async def on_ready(self, channel: "MpChannel"):
         # All players are ready
-        await self.call_ext(
+        await self.emit(
             AllPlayerReady,
             channel,
         )
@@ -656,7 +672,7 @@ class MultiplayerHandler:
     async def on_result(self, channel: "MpChannel", user: str, score: str, status: str):
         # _CHIMERA finished playing (Score: 86698, FAILED).
         passed = status == "PASSED"
-        await self.call_ext(
+        await self.emit(
             PlayerFinished,
             channel,
             user=user,
@@ -668,7 +684,7 @@ class MultiplayerHandler:
     async def on_finished(self, channel: "MpChannel"):
         # The match has finished!
         channel.started = False
-        await self.call_ext(
+        await self.emit(
             MatchFinished,
             channel,
         )

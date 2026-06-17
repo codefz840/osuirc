@@ -1,6 +1,6 @@
 from typing import Dict
 
-from osuirc.objects.enums import Mods, TeamType
+from osuirc.objects.enums import Mods, MpStatus, TeamType
 
 
 class Slot(object):
@@ -33,16 +33,16 @@ class Slots(object):
 
     def move(self, username: str, new_slot: int):
         """移動使用者"""
-        old_slot = self._username_slot[username]  # 獲取使用者的位置
-        self._username_slot[username] = new_slot  # 變更使用者索引
-        self._slots[new_slot] = self._slots.pop(old_slot)
+        old_slot = self._username_slot[username]            # 獲取使用者的位置
+        self._username_slot[username] = new_slot            # 變更使用者索引
+        self._slots[new_slot] = self._slots.pop(old_slot)   # 提取玩家資料到新的位置
 
     def set(
         self,
         slot_number: int,
         username: str,
         user_id: int = None,
-        status: str = "Not Ready",
+        status: MpStatus = MpStatus.NotReady,
         is_host: bool = False,
         team: TeamType = TeamType.Neutral,
         enabled_mods: Mods = Mods.NoMod,

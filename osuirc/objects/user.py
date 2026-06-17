@@ -1,5 +1,5 @@
 from typing import TYPE_CHECKING, Any, Dict
-
+import asyncio
 
 if TYPE_CHECKING:
     from ..client import IrcClient
@@ -15,7 +15,7 @@ class User(object):
             return
 
         self.user_id = user_id
-        self.__client.loop.create_task(self.__client.send_command("WHOIS " + username))
+        asyncio.run(self.__client.send_command("WHOIS " + username))
 
     def __repr__(self) -> str:
         return f"<User {self.username}>"

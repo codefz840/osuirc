@@ -7,11 +7,21 @@ from .objects.channel import Channel, MpChannel
 from .objects.message import Message
 from .objects.user import User
 from .utils.errors import EmptyError
-from .utils.events import BaseMatchEvent, ClientEvents
+from .utils.events import BaseMatchEvent
 
 
 MatchEvent = TypeVar("MatchEvent", bound=BaseMatchEvent)
 log = logging.getLogger("IrcClient")
+
+
+def get_channel_name(channel: Union[Channel, str]):
+    if isinstance(channel, Channel):
+        channel_name = channel.name
+    elif isinstance(channel, str):
+        channel_name = ["#", ""][channel[0] == "#"] + channel  # 如果輸入沒有開頭 `#` 會自動補上
+    else:
+        raise ValueError("channel 參數只支援 Channel、str 類別")
+    return channel_name
 
 
 class IrcClient:
@@ -35,20 +45,26 @@ class IrcClient:
         self.debug: bool = debug
         self.limit: float = 1.0
         self.running: bool = False
-        self.loop = asyncio.get_event_loop()
 
         self.channels: Dict[str, Union[Channel, MpChannel]] = {}
         self.commands: Dict[str, Callable] = {}
         self.users_cache: Dict[str, User] = {}
 
-        self.handler = IrcHandler(self)
+        self.irc_message_handler = IrcHandler(self)
         self.mphandler = MultiplayerHandler(self)
 
-    def run(self):
-        self.running = True
+        self.__flag_welcome = asyncio.Event()
+        self.__flag_motd_start = asyncio.Event()
+        self.__flag_motd_end = asyncio.Event()
 
+    async def run(self):
+        self.running = True
+        self.sendmsg_queue = asyncio.Queue()
         try:
-            self.loop.run_until_complete(self.start())
+            self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
+            await self.send_command(f"PASS {self.password}")
+            await self.send_command(f"NICK {self.nickname}")
+            await asyncio.gather(self.listen(), self.sender())
         except KeyboardInterrupt:
             self.stop()
         finally:
@@ -56,17 +72,6 @@ class IrcClient:
 
     def stop(self):
         self.running = False
-
-    async def start(self):
-        self.events = ClientEvents()
-        self.sendmsg_queue = asyncio.Queue()
-
-        self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
-
-        await self.send_command(f"PASS {self.password}")
-        await self.send_command(f"NICK {self.nickname}")
-
-        await asyncio.gather(self.listen(), self.sender())
 
     async def send_command(self, content: str):
         self.writer.write((content + "\r\n").encode(self.encoding))
@@ -76,38 +81,24 @@ class IrcClient:
         self, target, content: str, *, action: bool = False, ignore_limit: bool = False
     ):
         _content = f"\x01ACTION {content}\x01" if action else content
-        task = self.send_command(f"PRIVMSG {target} :{_content}")
+        send_message = self.send_command(f"PRIVMSG {target} :{_content}")
 
-        if not ignore_limit:
-            self.sendmsg_queue.put_nowait(task)
+        if ignore_limit:
+            await send_message
         else:
-            await task
+            self.sendmsg_queue.put_nowait(send_message)
 
     async def join(self, channel: Union[Channel, str]):
-        if isinstance(channel, Channel):
-            channel_name = channel.name
-        elif isinstance(channel, str):
-            channel_name = ["#", ""][channel[0] == "#"] + channel  # 如果輸入沒有開頭 `#` 會自動補上
-        else:
-            raise ValueError("channel 參數只支援 Channel、str 類別")
-
-        await self.send_command(f"JOIN {channel_name}")
+        await self.send_command(f"JOIN {get_channel_name(channel)}")
 
     async def part(self, channel: Union[Channel, str]):
-        if isinstance(channel, Channel):
-            channel_name = channel.name
-        elif isinstance(channel, str):
-            channel_name = ["#", ""][channel[0] == "#"] + channel  # 如果輸入沒有開頭 `#` 會自動補上
-        else:
-            raise ValueError("channel 參數只支援 Channel、str 類別")
-
-        await self.send_command(f"PART {channel_name}")
+        await self.send_command(f"PART {get_channel_name(channel)}")
 
     async def listen(self):
         while self.running:
             if raw := await self.reader.readline():
                 payload = raw.decode(self.encoding).strip()
-                asyncio.create_task(self.handler(payload))
+                asyncio.create_task(self.irc_message_handler(payload))
             else:
                 raise EmptyError("空資料")
 
@@ -118,6 +109,7 @@ class IrcClient:
             await asyncio.sleep(self.limit)
 
     def get_channel(self, channel_name: str) -> Union[Channel, MpChannel]:
+        # 正規化 channel_name
         if channel_name[0] != "#":
             if channel_name.lower() == self.nickname.lower():
                 return Channel(self, channel_name)
@@ -125,19 +117,25 @@ class IrcClient:
 
         channel = self.channels.get(channel_name)
         if channel is None:
-            channel = [Channel, MpChannel][channel_name[:4] == "#mp_"](
-                self, channel_name
-            )
+            is_mproom = channel_name[:4] == "#mp_"
+            channel = [Channel, MpChannel][is_mproom](self, channel_name)
             self.channels[channel_name] = channel
             log.debug(f"NEW_CHANNEL: {channel=}")
 
         return channel
+    
+    def get_user(self, username: str):
+        user = self.users_cache.get(username)
+        if user:
+            return user
+        user = User(self, username)
+        self.users_cache[username] = user
+        return user
 
     def command(self, name: str = None):
         def wapper(func):
             cmd_name = name or func.__name__
             self.commands[cmd_name] = func
-
         return wapper
 
     def mp_listen(self, event: MatchEvent):

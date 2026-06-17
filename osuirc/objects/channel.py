@@ -1,8 +1,9 @@
 from typing import TYPE_CHECKING, Set
+from asyncio import Event
 
 from osuirc.objects.osu import Beatmap
 
-from .enums import Mods, ScoreMode, TeamMode
+from .enums import Mods, MpStatus, ScoreMode, TeamMode, TeamType
 from ..objects.slot import Slots
 from ..utils.errors import NotInChannel
 
@@ -65,7 +66,40 @@ class MpChannel(Channel):
         self.locked: bool = False
         self.player_count: int = 0
         self.refs: set = {}
+        self.__flag_check_mp_settings = Event()
+        self.__player_count = 0
 
     @property
     def mp_id(self):
         return self._mp_id
+    
+    def reset_slots(self):
+        self.__player_count = 0
+        self.host = None
+        self.slots.clear()
+
+    def update_slot(self, *, slot: int, username: str, user_id: int = None, status: MpStatus = MpStatus.NotReady, is_host: bool = False, team: TeamType = TeamType.Neutral, enable_mods: Mods = Mods.NoMod):
+        if is_host:
+            self.host = username
+        self.slots.set(
+            slot_number=slot,
+            username=username,
+            user_id=user_id,
+            status=status,
+            is_host=is_host,
+            team=team,
+            enabled_mods=enable_mods
+        )
+        self.__player_count += 1
+        if self.__player_count == self.player_count:
+            self.__flag_check_mp_settings.set()
+    
+    async def check_all_ready(self):
+        await self.send("!mp settings")
+        await self.__flag_check_mp_settings.wait()
+        ready_count = 0
+        for player in self.slots:
+            if player.status == MpStatus.Ready:
+                ready_count += 1
+        return ready_count == self.player_count
+            
