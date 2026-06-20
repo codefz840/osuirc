@@ -60,7 +60,7 @@ class IrcHandler:
         }
 
     async def __call__(self, payload: str) -> None:
-        for pattern in irc_events:
+        for pattern in self.events:
             if m := re.match(pattern, payload):
                 return await self.events[pattern](*m.groups())
 
@@ -71,22 +71,22 @@ class IrcHandler:
 
     # @irc_hook(WELCOME)
     async def on_welcome(self):
-        self.client.__flag_welcome.set()
+        self.client._flag_welcome.set()
         asyncio.create_task(self.on_ready())
 
     async def on_motd(self, code: str, message: str):
         log.debug(message)
         if code == "375":
-            self.client.__flag_motd_start.set()
+            self.client._flag_motd_start.set()
         elif code == "376":
-            self.client.__flag_motd_end.set()
+            self.client._flag_motd_end.set()
         else:
             pass
 
     async def on_ready(self):
-        await self.client.__flag_welcome.wait()
-        await self.client.__flag_motd_start.wait()
-        await self.client.__flag_motd_end.wait()
+        await self.client._flag_welcome.wait()
+        await self.client._flag_motd_start.wait()
+        await self.client._flag_motd_end.wait()
         asyncio.create_task(self.client.on_ready())
         log.debug("ON_READY.")
 

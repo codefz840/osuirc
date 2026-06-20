@@ -53,9 +53,9 @@ class IrcClient:
         self.irc_message_handler = IrcHandler(self)
         self.mphandler = MultiplayerHandler(self)
 
-        self.__flag_welcome = asyncio.Event()
-        self.__flag_motd_start = asyncio.Event()
-        self.__flag_motd_end = asyncio.Event()
+        self._flag_welcome = asyncio.Event()
+        self._flag_motd_start = asyncio.Event()
+        self._flag_motd_end = asyncio.Event()
 
     async def run(self):
         self.running = True

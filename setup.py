@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setuptools.setup(
     name="osuirc",
-    version="0.1.0",
+    version="0.1.1",
     author="codefz840",
     author_email="code840@outlook.com",
     description="IRC client for osu!",
