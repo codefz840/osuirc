@@ -35,6 +35,7 @@ class IrcClient:
         api_key: str = None,
     ) -> None:
         # static
+        self.client_id = id(self)
         self.host: str = "cho.ppy.sh"
         self.port: int = 6667
         self.encoding: str = "UTF-8"
@@ -66,11 +67,12 @@ class IrcClient:
             await self.send_command(f"NICK {self.nickname}")
             await asyncio.gather(self.listen(), self.sender())
         except KeyboardInterrupt:
-            self.stop()
+            await self.stop()
         finally:
             log.info("Closed")
 
-    def stop(self):
+    async def stop(self):
+        await self.send_command("QUIT")
         self.running = False
 
     async def send_command(self, content: str):
