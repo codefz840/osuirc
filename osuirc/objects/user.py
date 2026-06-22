@@ -8,14 +8,18 @@ if TYPE_CHECKING:
 class User(object):
     def __init__(self, client: "IrcClient", username: str, user_id: int = None) -> None:
         self.__client = client
+        self.__id_fetched = False
         self.username = username
 
         if username == 'BanchoBot':
             self.user_id = 3
+            self.__id_fetched = True
             return
 
         self.user_id = user_id
-        asyncio.run(self.__client.send_command("WHOIS " + username))
+        if not self.__id_fetched:
+            asyncio.create_task(self.__client.send_command("WHOIS " + username))
+            self.__id_fetched = True
 
     def __repr__(self) -> str:
         return f"<User {self.username}>"
